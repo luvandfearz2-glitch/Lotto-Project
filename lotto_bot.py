@@ -133,7 +133,7 @@ def generate_recommendations():
         
     return results, last_drw_no
 
-# --- 4. 당첨 확인 로직 (주요 수정 부분) ---
+# --- 4. 당첨 확인 로직 (주요 수정 부분) 확인 ---
 def check_winning_status():
     """
     Firestore에서 '결과 대기(wait)' 상태인 문서를 찾아

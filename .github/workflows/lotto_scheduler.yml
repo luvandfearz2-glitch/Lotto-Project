@@ -1,0 +1,33 @@
+name: Lotto Weekly Bot
+
+on:
+  schedule:
+    # 한국 시간 토요일 밤 10시 (UTC 13:00)
+    - cron: '0 13 * * 6'
+  workflow_dispatch: # 수동 실행 버튼
+
+jobs:
+  run-lotto-bot:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        
+    - name: Install libraries
+      run: |
+        pip install firebase-admin requests
+        
+    - name: Create Account Key
+      env:
+        FIREBASE_KEY: ${{ secrets.FIREBASE_KEY }}
+      run: |
+        echo "$FIREBASE_KEY" > serviceAccountKey.json
+        
+    - name: Run Bot Script
+      run: python lotto_bot.py
