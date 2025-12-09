@@ -12,22 +12,28 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4  # v3 -> v4로 업그레이드
       
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5 # v4 -> v5로 업그레이드
       with:
-        python-version: '3.9'
+        python-version: '3.12'  # 3.9 -> 3.12로 업그레이드 (오류 해결)
         
     - name: Install libraries
       run: |
         pip install firebase-admin requests
         
-    - name: Create Account Key
+    - name: Create Account Key File
       env:
+        # 깃허브 비밀키를 환경 변수로 가져옴
         FIREBASE_KEY: ${{ secrets.FIREBASE_KEY }}
       run: |
+        # 키 내용이 비어있는지 확인하고 파일 생성
+        if [ -z "$FIREBASE_KEY" ]; then
+          echo "Error: FIREBASE_KEY is empty!"
+          exit 1
+        fi
         echo "$FIREBASE_KEY" > serviceAccountKey.json
-        
+
     - name: Run Bot Script
       run: python lotto_bot.py
