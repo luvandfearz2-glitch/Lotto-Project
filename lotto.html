@@ -15,7 +15,7 @@
             color: #333;
         }
         
-        /* 공통 스타일  */
+        /* 공통 스타일 */
         p, h1, h2, h3, h4, span, div, td, label { word-break: keep-all; word-wrap: break-word; }
         #sidebar { transition: transform 0.3s ease-in-out; transform: translateX(-100%); }
         #sidebar.open { transform: translateX(0); }
@@ -37,6 +37,10 @@
         .ball-red { background: #ff7272; }
         .ball-gray { background: #aaaaaa; }
         .ball-green { background: #b0d840; }
+
+        /* 테이블 공 스타일 */
+        .w-6 { width: 24px; }
+        .h-6 { height: 24px; }
     </style>
     
     <script type="module">
@@ -68,7 +72,8 @@
         }
 
         const COLLECTIONS = {
-            LOTTO: `/artifacts/${appId}/public/data/lotto_predictions` // 로또 데이터 경로
+            // 수정된 부분: 단순 경로로 통일 (lotto_bot.py와 동일하게 설정)
+            LOTTO: `lotto_predictions` 
         };
 
         function initializeFirebase() {
@@ -77,7 +82,7 @@
                 const app = initializeApp(firebaseConfig);
                 db = getFirestore(app);
                 auth = getAuth(app);
-                storage = getStorage(app); // 스토리지 초기화
+                storage = getStorage(app); 
                 
                 onAuthStateChanged(auth, async (user) => {
                     if (user) {
@@ -113,17 +118,48 @@
             });
         }
 
-        // 메인(최신) 예측 렌더링
+        // 메인(최신) 예측 렌더링 (5세트 표시 기능 추가)
         function renderMainPrediction(data) {
             const container = document.getElementById('latest-prediction-container');
-            if (!data) {
+            if (!data || !data.numbers || !data.full_sets) {
                 container.innerHTML = '<div class="text-center py-10 text-gray-500">데이터 준비 중입니다...</div>';
                 return;
             }
 
+            // 1. 메인 (최신) 예측 렌더링 (첫 번째 세트)
             const numbersHtml = data.numbers.map(n => 
                 `<div class="lotto-ball ${getBallColorClass(n)} text-xl shadow-lg">${n}</div>`
             ).join('');
+
+            // 2. 전체 5세트 렌더링 (JSON 문자열을 리스트로 변환)
+            let fullSets;
+            try {
+                // full_sets 필드는 JSON 문자열로 저장되어 있으므로 파싱 필요
+                fullSets = JSON.parse(data.full_sets);
+            } catch (e) {
+                console.error("Failed to parse full_sets JSON:", e);
+                fullSets = [data.numbers]; // 파싱 실패 시 메인 번호만 표시
+            }
+            
+            // 테이블 생성 (나머지 4세트 또는 5세트 전체)
+            const setsTableHtml = fullSets.map((set, index) => {
+                const setNumbersHtml = set.map(n => 
+                    `<div class="lotto-ball ${getBallColorClass(n)} w-6 h-6 text-xs mr-1">${n}</div>`
+                ).join('');
+                
+                // 첫 번째 세트는 메인에 이미 표시했으므로 테이블에서는 강조만 합니다.
+                const rowClass = index === 0 ? 'bg-indigo-50 font-bold text-indigo-800' : 'text-gray-700';
+                
+                return `
+                    <tr class="border-t border-gray-100 ${rowClass}">
+                        <td class="p-3 whitespace-nowrap text-center">${index + 1}</td>
+                        <td class="p-3">
+                            <div class="flex flex-wrap items-center">${setNumbersHtml}</div>
+                        </td>
+                        <td class="p-3 text-sm text-center">${index === 0 ? 'AI BEST PICK' : 'Combination'}</td>
+                    </tr>
+                `;
+            }).join('');
 
             container.innerHTML = `
                 <div class="text-center">
@@ -135,11 +171,29 @@
                         ${numbersHtml}
                     </div>
 
-                    <div class="bg-white rounded-xl border border-indigo-100 p-4 shadow-sm">
+                    <div class="bg-white rounded-xl border border-indigo-100 p-4 shadow-sm mb-8">
                         <h3 class="text-sm font-bold text-gray-700 mb-2">📢 AI 분석 코멘트</h3>
                         <p class="text-sm text-gray-600 leading-relaxed">
                             ${data.aiComment || "최근 5년 데이터를 분석하여 당첨 확률이 가장 높은 조합을 산출했습니다."}
                         </p>
+                    </div>
+                    
+                    <div class="mt-8">
+                        <h4 class="text-lg font-bold text-gray-800 mb-3 text-left border-b pb-2">전체 추천 5 조합</h4>
+                        <div class="overflow-x-auto rounded-lg border border-gray-200 shadow-sm">
+                            <table class="min-w-full divide-y divide-gray-200">
+                                <thead class="bg-gray-50">
+                                    <tr>
+                                        <th class="px-3 py-2 text-center text-xs font-medium text-gray-500 uppercase tracking-wider w-1/12">No.</th>
+                                        <th class="px-3 py-2 text-center text-xs font-medium text-gray-500 uppercase tracking-wider w-8/12">추천 번호</th>
+                                        <th class="px-3 py-2 text-center text-xs font-medium text-gray-500 uppercase tracking-wider w-3/12">구분</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="bg-white divide-y divide-gray-100 text-sm">
+                                    ${setsTableHtml}
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
                 </div>
             `;
@@ -162,8 +216,13 @@
 
                 // 결과 뱃지
                 let resultBadge = '<span class="bg-gray-100 text-gray-500 text-xs px-2 py-1 rounded">결과 대기</span>';
-                if (item.result === 'win') resultBadge = '<span class="bg-red-100 text-red-600 text-xs px-2 py-1 rounded font-bold">🎉 당첨</span>';
-                else if (item.result === 'lose') resultBadge = '<span class="bg-gray-200 text-gray-500 text-xs px-2 py-1 rounded">낙첨</span>';
+                // 5세트 중 최고 등수 표시 (best_rank 필드 사용)
+                if (item.result === 'win') {
+                    const rankMsg = item.best_rank ? `${item.best_rank}등` : '당첨';
+                    resultBadge = `<span class="bg-red-100 text-red-600 text-xs px-2 py-1 rounded font-bold">🎉 ${rankMsg}</span>`;
+                } else if (item.result === 'lose') {
+                    resultBadge = '<span class="bg-gray-200 text-gray-500 text-xs px-2 py-1 rounded">낙첨</span>';
+                }
 
                 // 인증샷 버튼 또는 이미지
                 let verifyContent = '';
@@ -207,7 +266,6 @@
             const confirmUpload = confirm('이 사진을 구매 인증샷으로 등록하시겠습니까?');
             if (!confirmUpload) return;
 
-            // 로딩 표시 (간단히 버튼 텍스트 변경 등으로 처리 가능하지만 여기선 alert로 대체)
             alert('사진을 업로드 중입니다...');
 
             try {
@@ -308,7 +366,6 @@
         </nav>
         
         <div class="p-4 sm:p-6 lg:p-8">
-            <!-- 헤더 -->
             <header class="bg-gradient-to-r from-purple-600 to-indigo-600 rounded-2xl shadow-xl p-6 mb-8 text-white relative overflow-hidden">
                 <div class="relative z-10">
                     <h1 class="text-3xl sm:text-4xl font-extrabold tracking-tight mb-2 flex items-center">
@@ -326,7 +383,6 @@
             </header>
         
             <main>
-                <!-- 메인 추천 영역 -->
                 <div id="latest-prediction-container" class="bg-white p-8 rounded-2xl shadow-lg border-2 border-indigo-100 mb-8 transform transition hover:scale-[1.01]">
                     <div class="text-center py-10">
                         <div class="animate-spin rounded-full h-10 w-10 border-b-2 border-indigo-600 mx-auto mb-4"></div>
@@ -334,13 +390,11 @@
                     </div>
                 </div>
 
-                <!-- 히스토리 영역 -->
                 <h3 class="text-xl font-bold text-gray-800 mb-4 flex items-center">
                     📜 이전 회차 예측 결과
                 </h3>
                 <div id="history-list" class="space-y-4">
-                    <!-- 리스트 아이템이 여기에 들어갑니다 -->
-                </div>
+                    </div>
             </main>
         </div>
     </div>
