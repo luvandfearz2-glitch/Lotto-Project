@@ -2,15 +2,18 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import requests
 import datetime
+from datetime import datetime as dt
 import random
 from collections import Counter
 import os
 import json
 
 # --- 1. 설정 및 초기화 ---
+# GitHub Actions 환경 또는 로컬 환경에서 키 파일 로드
 if os.environ.get('FIREBASE_KEY'):
     cred = credentials.Certificate("serviceAccountKey.json")
 else:
+    # 로컬 테스트 시에도 동일한 파일명 사용
     cred = credentials.Certificate("serviceAccountKey.json")
 
 try:
@@ -36,7 +39,7 @@ def get_official_lotto_result(drwNo):
             }
         return None
     except Exception as e:
-        print(f"API Error: {e}")
+        print(f"API Error (Round {drwNo}): {e}")
         return None
 
 def calculate_rank(my_numbers, win_numbers, bonus_number):
@@ -69,10 +72,12 @@ def get_cold_numbers_stats(history_data):
     return freq_list
 
 def is_valid_birthday_exclusion(numbers):
+    # 생일 번호(1~31) 위주를 피하고 고번호(32~45)를 4개 이상 포함하는지 확인
     high_count = sum(1 for n in numbers if 32 <= n <= 45)
     return high_count >= 4
 
 def has_visual_pattern(numbers):
+    # 가로 또는 세로로 3개 이상 연속된 패턴 방지
     grid = [[0]*7 for _ in range(7)]
     for n in numbers:
         r, c = (n - 1) // 7, (n - 1) % 7
@@ -87,12 +92,22 @@ def has_visual_pattern(numbers):
     return False
 
 def generate_recommendations():
-    last_drw_no = 1150 
+    # [개선] 날짜 기반으로 현재 가능한 가장 최신 회차를 계산
+    # 로또 1회차: 2002년 12월 7일
+    base_date = dt(2002, 12, 7)
+    now = dt.now()
+    # 주차 계산을 통해 이론적인 최신 회차 도출
+    theoretical_last_round = (now - base_date).days // 7 + 1
     
-    while get_official_lotto_result(last_drw_no + 1):
-        last_drw_no += 1
+    # API 서버 지연 등을 고려하여 실제 결과가 존재하는 가장 최근 회차 확인
+    last_drw_no = theoretical_last_round
+    while last_drw_no > 1:
+        if get_official_lotto_result(last_drw_no):
+            break
+        last_drw_no -= 1
             
     recent_history = []
+    # 통계 분석을 위해 최근 50회차 데이터 수집
     for i in range(last_drw_no, last_drw_no - 50, -1):
         res = get_official_lotto_result(i)
         if res: recent_history.append(res)
@@ -125,23 +140,16 @@ def generate_recommendations():
         
     return results, last_drw_no
 
-# --- [NEW] 4. 동적 코멘트 생성 함수 ---
+# --- 4. 동적 코멘트 생성 함수 ---
 def generate_dynamic_comment(best_numbers):
-    """추천된 번호(best_numbers)를 분석하여 그럴싸한 코멘트를 생성합니다."""
-    
-    # 분석 지표 계산
     total_sum = sum(best_numbers)
     high_cnt = sum(1 for n in best_numbers if n >= 32)
     odd_cnt = sum(1 for n in best_numbers if n % 2 != 0)
     
-    # 연속 번호 확인 (예: 34, 35)
     has_consecutive = any(best_numbers[i] == best_numbers[i-1] + 1 for i in range(1, len(best_numbers)))
-    
-    # 끝수 동일 확인 (예: 12, 42)
     end_digits = [n % 10 for n in best_numbers]
     has_same_end = len(end_digits) != len(set(end_digits))
 
-    # 1. 서두 (알고리즘 강조) - 무작위 선택
     intros = [
         "최근 50회차 미출현 '콜드 넘버' 가중치를 기반으로,",
         "역 빈발 패턴 마이닝 알고리즘을 적용하여,",
@@ -150,28 +158,21 @@ def generate_dynamic_comment(best_numbers):
     ]
     intro = random.choice(intros)
 
-    # 2. 본문 (실제 번호 특징 반영)
     details = []
-    
     if total_sum >= 160:
         details.append(f"총합 {total_sum}의 높은 수치로 고구간 집중 전략을 세웠으며,")
     elif total_sum <= 120:
         details.append(f"총합 {total_sum}의 낮은 수치로 분산 투자를 유도했으며,")
+    else:
+        details.append("홀짝 비율이 가장 이상적인 황금 밸런스 조합입니다.")
     
     if has_consecutive:
         details.append("연속된 번호 조합을 포함하여 당첨 확률 변동성을 높였습니다.")
     elif has_same_end:
         details.append("동일한 끝수(동형수) 패턴을 적용하여 매칭 확률을 최적화했습니다.")
-    elif odd_cnt >= 4:
-        details.append("홀수 번호의 비중을 높여 통계적 불균형을 노렸습니다.")
-    elif odd_cnt <= 2:
-        details.append("짝수 번호 위주의 안정적인 밸런스를 구성했습니다.")
-    else:
-        details.append("홀짝 비율이 가장 이상적인 황금 밸런스 조합입니다.")
 
-    detail = details[0] # 가장 첫 번째 특징 사용
+    detail = details[0]
 
-    # 3. 결론
     outros = [
         "이번 주 가장 높은 기댓값을 보입니다.",
         "상위 1% 이내의 추천 조합입니다.",
@@ -181,8 +182,7 @@ def generate_dynamic_comment(best_numbers):
 
     return f"{intro} {detail} {outro}"
 
-
-# --- 5. 당첨 확인 로직 (기존 유지) ---
+# --- 5. 당첨 확인 로직 ---
 def check_winning_status():
     docs = db.collection(COLLECTION_NAME).where("result", "==", "wait").stream()
     updates_made = 0
@@ -234,19 +234,19 @@ def main():
     recommendations, last_round = generate_recommendations()
     next_round = last_round + 1
     
+    # 중복 방지 확인
     existing = db.collection(COLLECTION_NAME).where("round", "==", next_round).get()
     if len(existing) > 0:
         print(f"⚠️ {next_round}회차 데이터는 이미 존재합니다. 건너뜁니다.")
         return
 
+    # 추첨일 계산 (다가오는 토요일)
     today = datetime.date.today()
     days_ahead = 5 - today.weekday()
     if days_ahead < 0: days_ahead += 7
     next_date = today + datetime.timedelta(days=days_ahead)
     
     best_pick = recommendations[0] 
-    
-    # [수정됨] 동적 코멘트 생성 함수 호출
     ai_comment = generate_dynamic_comment(best_pick)
     
     new_doc = {
@@ -254,9 +254,9 @@ def main():
         "drawDate": next_date.strftime("%Y-%m-%d"),
         "numbers": best_pick,   
         "full_sets": json.dumps(recommendations),
-        "aiComment": ai_comment, # [수정됨] 고정 텍스트 대신 변수 사용
+        "aiComment": ai_comment,
         "result": "wait",
-        "createdAt": datetime.datetime.now().isoformat()
+        "createdAt": dt.now().isoformat()
     }
     
     db.collection(COLLECTION_NAME).add(new_doc)
