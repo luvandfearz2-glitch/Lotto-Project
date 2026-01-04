@@ -13,6 +13,7 @@ import time
 if os.environ.get('FIREBASE_KEY'):
     cred = credentials.Certificate("serviceAccountKey.json")
 else:
+    # 로컬 테스트용
     cred = credentials.Certificate("serviceAccountKey.json")
 
 try:
@@ -23,27 +24,30 @@ except ValueError:
 db = firestore.client()
 COLLECTION_NAME = "lotto_predictions"
 
-# --- 2. 로또 API 및 등수 계산 함수 ---
+# --- 2. 로또 API 및 등수 계산 함수 (보안 강화) ---
 def get_official_lotto_result(drwNo):
     url = f"https://www.dhlottery.co.kr/common.do?method=getLottoNumber&drwNo={drwNo}"
+    # 차단 방지를 위해 실제 브라우저처럼 보이도록 헤더 설정
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
     try:
-        # 연속 호출 시 차단 방지를 위한 짧은 대기
-        time.sleep(1)
-        res = requests.get(url, timeout=10, headers=headers)
-        data = res.json()
-        if data.get('returnValue') == 'success':
-            return {
-                'drwNo': data['drwNo'],
-                'date': data['drwNoDate'],
-                'numbers': [data[f'drwtNo{i}'] for i in range(1, 7)],
-                'bonus': data['bnusNo']
-            }
+        # 연속 호출 시 차단 위험을 줄이기 위해 매너 타임 적용
+        time.sleep(2) 
+        res = requests.get(url, timeout=15, headers=headers)
+        
+        if res.status_code == 200:
+            data = res.json()
+            if data.get('returnValue') == 'success':
+                return {
+                    'drwNo': data['drwNo'],
+                    'date': data['drwNoDate'],
+                    'numbers': [data[f'drwtNo{i}'] for i in range(1, 7)],
+                    'bonus': data['bnusNo']
+                }
         return None
     except Exception as e:
-        print(f"API Error (Round {drwNo}): {e}")
+        print(f"⚠️ API Error (Round {drwNo}): {e}")
         return None
 
 def calculate_rank(my_numbers, win_numbers, bonus_number):
@@ -64,19 +68,16 @@ def get_cold_numbers_stats(history_data):
     for record in history_data:
         all_numbers.extend(record['numbers'])
     counts = Counter(all_numbers)
-    freq_list = [(n, counts.get(n, 0)) for n in range(1, 46)]
-    freq_list.sort(key=lambda x: x[1]) 
-    return freq_list
+    return sorted([(n, counts.get(n, 0)) for n in range(1, 46)], key=lambda x: x[1])
 
 def is_valid_birthday_exclusion(numbers):
-    high_count = sum(1 for n in numbers if 32 <= n <= 45)
-    return high_count >= 4
+    # 고번호(32-45) 4개 이상 포함
+    return sum(1 for n in numbers if 32 <= n <= 45) >= 4
 
 def has_visual_pattern(numbers):
     grid = [[0]*7 for _ in range(7)]
     for n in numbers:
-        r, c = (n - 1) // 7, (n - 1) % 7
-        grid[r][c] = 1
+        grid[(n-1)//7][(n-1)%7] = 1
     for r in range(7):
         for c in range(5):
             if grid[r][c] and grid[r][c+1] and grid[r][c+2]: return True
@@ -86,34 +87,24 @@ def has_visual_pattern(numbers):
     return False
 
 def generate_recommendations():
-    # [개선] 날짜 기반으로 최신 회차 계산 (API 장애 대응)
+    # [핵심 수정] 고정 숫자 1150을 지우고 날짜 기반으로 회차 자동 계산
     base_date = dt(2002, 12, 7, 20, 45)
     now = dt.now()
-    last_drw_no = ((now - base_date).days // 7) + 1
+    # 2026년에도 정확한 회차를 찾아내도록 설계
+    calculated_last_no = ((now - base_date).days // 7) + 1
     
-    # 실제 API로 존재 여부 최종 확인 (최대 3회차까지만 역추적하여 무한루프 방지)
-    confirmed_last_no = last_drw_no
-    for i in range(last_drw_no, last_drw_no - 3, -1):
-        if get_official_lotto_result(i):
-            confirmed_last_no = i
-            break
-            
     recent_history = []
-    # 통계 분석을 위해 최근 50회차 데이터 수집 시도
-    # (API 차단 방지를 위해 실패 시 바로 중단하도록 설정)
-    for i in range(confirmed_last_no, confirmed_last_no - 50, -1):
+    # 통계용 데이터 수집 (최근 10회차만 시도하여 차단 리스크 감소)
+    for i in range(calculated_last_no, calculated_last_no - 10, -1):
         res = get_official_lotto_result(i)
-        if res: 
-            recent_history.append(res)
-        else:
-            # API 응답이 없으면 일단 수집된 데까지만 사용
-            break
+        if res: recent_history.append(res)
+        if len(recent_history) >= 5: break
         
-    # 만약 데이터가 너무 적으면 기본 랜덤 생성으로 안전하게 처리
-    if len(recent_history) < 5:
-        print("⚠️ 충분한 과거 데이터를 가져오지 못했습니다. 기본 랜덤 알고리즘을 사용합니다.")
+    # API가 모두 차단된 경우를 대비한 안전 장치
+    if len(recent_history) < 3:
+        print("⚠️ API 제한으로 인해 기본 알고리즘으로 생성합니다.")
         results = [sorted(random.sample(range(1, 46), 6)) for _ in range(5)]
-        return results, confirmed_last_no
+        return results, calculated_last_no
 
     freq_list = get_cold_numbers_stats(recent_history)
     cold_high = [x[0] for x in freq_list if x[0] >= 32]
@@ -121,90 +112,56 @@ def generate_recommendations():
     
     results = []
     while len(results) < 5:
-        pool_high = cold_high[:15]
-        pool_low = cold_low[:25]
-        n_high = random.choice([4, 4, 5, 5, 6])
-        n_low = 6 - n_high
+        n_high = random.choice([4, 5])
         try:
-            current_high = random.sample(pool_high, n_high)
-            current_low = random.sample(pool_low, n_low) if n_low > 0 else []
-        except ValueError: continue
-            
-        combination = sorted(current_high + current_low)
-        if not is_valid_birthday_exclusion(combination): continue
-        if has_visual_pattern(combination): continue
-        if combination in results: continue
-        results.append(combination)
-        
-    return results, confirmed_last_no
+            comb = sorted(random.sample(cold_high[:15], n_high) + random.sample(cold_low[:25], 6-n_high))
+        except: continue
+        if is_valid_birthday_exclusion(comb) and not has_visual_pattern(comb) and comb not in results:
+            results.append(comb)
+    return results, calculated_last_no
 
 # --- 4. 동적 코멘트 생성 함수 (기존 유지) ---
 def generate_dynamic_comment(best_numbers):
     total_sum = sum(best_numbers)
-    high_cnt = sum(1 for n in best_numbers if n >= 32)
-    odd_cnt = sum(1 for n in best_numbers if n % 2 != 0)
-    has_consecutive = any(best_numbers[i] == best_numbers[i-1] + 1 for i in range(1, len(best_numbers)))
-    end_digits = [n % 10 for n in best_numbers]
-    has_same_end = len(end_digits) != len(set(end_digits))
+    intros = ["최근 미출현 '콜드 넘버' 가중치를 기반으로,", "고번호 집중 분포 데이터를 분석한 결과,"]
+    outro = random.choice(["이번 주 높은 기댓값을 보입니다.", "상위 1% 추천 조합입니다."])
+    return f"{random.choice(intros)} 총합 {total_sum}의 최적 조합입니다. {outro}"
 
-    intros = [
-        "최근 50회차 미출현 '콜드 넘버' 가중치를 기반으로,",
-        "역 빈발 패턴 마이닝 알고리즘을 적용하여,",
-        "고번호(32+) 집중 분포 데이터를 분석한 결과,",
-        "과거 당첨 번호의 벡터 유사도 분석을 통해,"
-    ]
-    intro = random.choice(intros)
-
-    details = []
-    if total_sum >= 160: details.append(f"총합 {total_sum}의 높은 수치로 고구간 집중 전략을 세웠으며,")
-    elif total_sum <= 120: details.append(f"총합 {total_sum}의 낮은 수치로 분산 투자를 유도했으며,")
-    
-    if has_consecutive: details.append("연속된 번호 조합을 포함하여 당첨 확률 변동성을 높였습니다.")
-    elif has_same_end: details.append("동일한 끝수(동형수) 패턴을 적용하여 매칭 확률을 최적화했습니다.")
-    elif odd_cnt >= 4: details.append("홀수 번호의 비중을 높여 통계적 불균형을 노렸습니다.")
-    else: details.append("홀짝 비율이 가장 이상적인 황금 밸런스 조합입니다.")
-
-    detail = details[0]
-    outros = ["이번 주 가장 높은 기댓값을 보입니다.", "상위 1% 이내의 추천 조합입니다.", "강력한 당첨 신호가 감지되었습니다."]
-    return f"{intro} {detail} {random.choice(outros)}"
-
-# --- 5. 당첨 확인 로직 (기존 유지) ---
+# --- 5. 당첨 확인 및 업데이트 로직 (개선) ---
 def check_winning_status():
+    # 'wait' 상태인 문서들을 모두 가져와서 업데이트 시도
     docs = db.collection(COLLECTION_NAME).where("result", "==", "wait").stream()
     updates_made = 0
     for doc in docs:
         data = doc.to_dict()
         round_no = data['round']
-        my_sets_raw = data.get('full_sets', data.get('numbers', []))
-        if isinstance(my_sets_raw, str):
-            try: my_sets = json.loads(my_sets_raw)
-            except: continue
-        else: my_sets = [my_sets_raw] 
-
         official = get_official_lotto_result(round_no)
-        if not official: continue
-        win_numbers = official['numbers']
-        bonus_number = official['bonus']
         
-        detailed_results = [] 
-        best_rank = -1        
-        is_any_win = False    
-        for idx, numbers in enumerate(my_sets):
-            rank, msg = calculate_rank(numbers, win_numbers, bonus_number)
-            detailed_results.append({"index": idx + 1, "numbers": numbers, "rank": rank, "message": msg})
-            if rank != -1: 
-                is_any_win = True
-                if best_rank == -1 or rank < best_rank: best_rank = rank
-
+        if not official: continue
+            
+        my_sets_raw = data.get('full_sets', [])
+        my_sets = json.loads(my_sets_raw) if isinstance(my_sets_raw, str) else [data['numbers']]
+        
+        win_nums = official['numbers']
+        bnus = official['bonus']
+        
+        detailed = []
+        best_r = -1
+        for idx, nums in enumerate(my_sets):
+            rank, msg = calculate_rank(nums, win_nums, bnus)
+            detailed.append({"index": idx+1, "numbers": nums, "rank": rank, "message": msg})
+            if rank != -1 and (best_r == -1 or rank < best_r): best_r = rank
+            
         doc.reference.update({
-            "result": "win" if is_any_win else "lose",
-            "best_rank": best_rank,
-            "winningNumbers": win_numbers,
-            "bonus": bonus_number,
-            "detailed_results": detailed_results 
+            "result": "win" if best_r != -1 else "lose",
+            "best_rank": best_r,
+            "winningNumbers": win_nums,
+            "bonus": bnus,
+            "detailed_results": detailed
         })
+        print(f"✅ {round_no}회차 결과 업데이트 완료")
         updates_made += 1
-    print(f"✅ 결과 업데이트 완료: {updates_made}건")
+    return updates_made
 
 # --- 6. 메인 실행 함수 ---
 def main():
@@ -215,29 +172,26 @@ def main():
     recommendations, last_round = generate_recommendations()
     next_round = last_round + 1
     
-    existing = db.collection(COLLECTION_NAME).where("round", "==", next_round).get()
-    if len(existing) > 0:
-        print(f"⚠️ {next_round}회차 데이터가 이미 존재합니다.")
+    # 중복 생성 방지
+    if len(db.collection(COLLECTION_NAME).where("round", "==", next_round).get()) > 0:
+        print(f"⚠️ {next_round}회차는 이미 존재합니다.")
         return
 
     today = datetime.date.today()
-    days_ahead = (5 - today.weekday()) % 7
-    next_date = today + datetime.timedelta(days=days_ahead)
+    next_date = today + datetime.timedelta(days=(5 - today.weekday()) % 7)
     
-    best_pick = recommendations[0] 
-    ai_comment = generate_dynamic_comment(best_pick)
-    
+    best_pick = recommendations[0]
     new_doc = {
         "round": next_round,
         "drawDate": next_date.strftime("%Y-%m-%d"),
-        "numbers": best_pick,   
+        "numbers": best_pick,
         "full_sets": json.dumps(recommendations),
-        "aiComment": ai_comment,
+        "aiComment": generate_dynamic_comment(best_pick),
         "result": "wait",
         "createdAt": dt.now().isoformat()
     }
     db.collection(COLLECTION_NAME).add(new_doc)
-    print(f"🚀 {next_round}회차 추천 완료: {best_pick}")
+    print(f"🚀 {next_round}회차 생성 완료!")
 
 if __name__ == "__main__":
     main()
