@@ -2,8 +2,9 @@ name: Lotto Weekly Bot
 
 on:
   schedule:
-    # 한국 시간 토요일 밤 10시 (UTC 13:00)
-    - cron: '0 13 * * 6'
+    # 한국 시간(KST) 일요일 오전 07:00 (추천 데이터 소스 업데이트 완료 시간 반영)
+    # UTC 기준 토요일 22:00 (07:00 - 9시간)
+    - cron: '0 22 * * 6'
   workflow_dispatch: # 수동 실행 버튼
 
 jobs:
@@ -21,7 +22,7 @@ jobs:
         
     - name: Install libraries
       run: |
-        # 웹 스크래핑(beautifulsoup4)과 최신 Firestore 필터링을 위한 라이브러리 추가
+        # 웹 스크래핑(beautifulsoup4)과 최신 Firestore 필터링 및 데이터 처리를 위한 라이브러리 설치
         pip install firebase-admin requests beautifulsoup4 google-cloud-firestore
         
     - name: Create Account Key File
