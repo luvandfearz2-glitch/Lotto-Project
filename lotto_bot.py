@@ -4,10 +4,8 @@ import requests
 import datetime
 from datetime import datetime as dt
 import random
-from collections import Counter
 import os
 import json
-from bs4 import BeautifulSoup
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 # --- 1. 설정 및 초기화 ---
@@ -19,55 +17,54 @@ if os.path.exists(cred_path):
     except ValueError:
         firebase_admin.initialize_app(cred)
 else:
-    print("❌ 에러: serviceAccountKey.json 파일을 찾을 수 없습니다.")
+    print("❌ serviceAccountKey.json을 찾을 수 없습니다.")
     exit(1)
 
 db = firestore.client()
 COLLECTION_NAME = "lotto_predictions"
 
-# --- 2. 데이터 수집 (스크래핑 + 백업 계산 로직) ---
-def get_lotto_data_safe():
-    """웹 스크래핑으로 최신 당첨 정보를 가져오며, 실패 시 날짜 기반으로 회차를 계산합니다."""
-    url = "https://dhlottery.co.kr/gameResult.do?method=byWin"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+# --- 2. GitHub 오픈소스 데이터셋에서 로또 번호 가져오기 ---
+def get_lotto_data_from_github():
+    """
+    해외 IP 차단을 피하기 위해 GitHub에 호스팅된 로또 데이터셋을 가져옵니다.
+    주로 'yous/lotto' 저장소가 업데이트가 빠르고 정확합니다.
+    """
+    # 1순위: yous/lotto (JSON 데이터셋)
+    url = "https://raw.githubusercontent.com/yous/lotto/master/data.json"
     
     try:
-        res = requests.get(url, headers=headers, timeout=15)
-        soup = BeautifulSoup(res.text, 'html.parser')
-        
-        # 회차 번호 추출
-        round_tag = soup.find('strong', id='lottoDrwNo') or soup.select_one('.win_result strong')
-        cur_round = int(round_tag.text.replace('회', '').strip())
-        
-        # 당첨 번호 6개 추출
-        win_div = soup.find('div', class_='num win')
-        win_list = win_div.find_all('span', class_='ball_645')
-        numbers = [int(n.text) for n in win_list]
-        
-        # 보너스 번호 추출
-        bonus_div = soup.find('div', class_='num bonus')
-        bonus = int(bonus_div.find('span', class_='ball_645').text)
-        
-        return {'drwNo': cur_round, 'numbers': numbers, 'bonus': bonus, 'success': True}
+        res = requests.get(url, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            # 데이터는 리스트 형태이며 마지막 요소가 최신 회차임
+            latest = data[-1]
+            return {
+                'drwNo': latest['round'],
+                'numbers': latest['numbers'],
+                'bonus': latest['bonus'],
+                'success': True
+            }
     except Exception as e:
-        print(f"⚠️ 스크래핑 실패 ({e}): 날짜 기반 계산으로 전환합니다.")
-        base_date = dt(2002, 12, 7) # 1회차 기준일
-        calc_round = (dt.now() - base_date).days // 7 + 1
-        return {'drwNo': calc_round, 'numbers': [], 'bonus': 0, 'success': False}
+        print(f"⚠️ GitHub 데이터 로드 실패: {e}")
+        
+    # 실패 시 백업: 날짜 기반 계산 (회차 번호만이라도 확보)
+    base_date = dt(2002, 12, 7)
+    calc_round = (dt.now() - base_date).days // 7 + 1
+    if dt.now().weekday() == 5 and dt.now().hour < 21: calc_round -= 1
+    
+    return {'drwNo': calc_round, 'numbers': [], 'bonus': 0, 'success': False}
 
 # --- 3. 로또 번호 추출 알고리즘 (3대 원칙 적용) ---
 def generate_advanced_numbers(latest_win_numbers):
     """
-    ① Cold Number 우선 (빈도 하위 20% 가중치)
+    ① Cold Number 우선 (하위 20% 빈도 가중치)
     ② 생일수 배제 (고번호 32~45번 4개 이상 필수)
-    ③ 시각적 패턴 제거 (7x7 용지 기준 직선/대각선 3연속 금지)
+    ③ 용지 시각적 패턴 제거 (7x7 용지 기준 3연속 금지)
     """
     results = []
     all_numbers = list(range(1, 46))
     
-    # [알고리즘 ①] Cold Number 후보군 설정 (최근 당첨번호 제외군)
+    # [알고리즘 ①] Cold Number: 최신 당첨 번호를 제외한 나머지 번호 풀 활용
     cold_pool = [n for n in all_numbers if n not in latest_win_numbers] if latest_win_numbers else all_numbers
     
     while len(results) < 5:
@@ -80,8 +77,7 @@ def generate_advanced_numbers(latest_win_numbers):
 
         # [알고리즘 ②] 생일수 배제: 고번호(32~45)가 4개 이상 포함되어야 함
         high_count = sum(1 for n in comb if 32 <= n <= 45)
-        if high_count < 4:
-            continue
+        if high_count < 4: continue
 
         # [알고리즘 ③] 용지 시각적 패턴 제거 (7x7 그리드)
         grid = [[0]*7 for _ in range(7)]
@@ -96,18 +92,13 @@ def generate_advanced_numbers(latest_win_numbers):
                    (grid[j][i] and grid[j+1][i] and grid[j+2][i]):
                     is_pattern = True; break
             if is_pattern: break
-            
-        # 대각선 3개 연속 체크
-        for r in range(5):
-            for c in range(5):
-                if grid[r][c] and grid[r+1][c+1] and grid[r+2][c+2]: is_pattern = True
 
         if not is_pattern and comb not in results:
             results.append(comb)
             
     return results
 
-# --- 4. Firebase 데이터 처리 (복원된 기능) ---
+# --- 4. Firebase 데이터 처리 및 신규 업로드 ---
 def sync_firebase_results(latest_info):
     """기존 'wait' 상태의 문서를 찾아 당첨 내역을 업데이트합니다."""
     docs = db.collection(COLLECTION_NAME).where(filter=FieldFilter("result", "==", "wait")).stream()
@@ -117,27 +108,21 @@ def sync_firebase_results(latest_info):
         data = doc.to_dict()
         doc_round = data.get('round')
         
-        # 현재 회차보다 이전이거나 같은 회차라면 결과 업데이트
         if doc_round <= latest_info['drwNo']:
-            update_data = {
-                "result": "processed",
-                "updatedAt": dt.now().isoformat()
-            }
-            # 스크래핑 성공 시 실제 당첨번호 기록
+            update_data = {"result": "processed", "updatedAt": dt.now().isoformat()}
             if latest_info['success'] and doc_round == latest_info['drwNo']:
                 update_data.update({
                     "winningNumbers": latest_info['numbers'],
                     "bonus": latest_info['bonus']
                 })
-            
             doc.reference.update(update_data)
             update_count += 1
             
     print(f"✅ 기존 당첨 내역 {update_count}건 업데이트 완료")
 
 def main():
-    print("--- 1. 최신 당첨 정보 동기화 ---")
-    latest = get_lotto_data_safe()
+    print("--- 1. 데이터 수집 (GitHub Source) 및 동기화 ---")
+    latest = get_lotto_data_from_github()
     sync_firebase_results(latest)
 
     print("\n--- 2. 신규 추천 번호 생성 및 업로드 ---")
@@ -146,26 +131,25 @@ def main():
     # 중복 업로드 방지
     existing = db.collection(COLLECTION_NAME).where(filter=FieldFilter("round", "==", next_round)).get()
     if len(existing) > 0:
-        print(f"⚠️ {next_round}회차 데이터가 이미 존재하여 생성을 건너뜁니다.")
+        print(f"⚠️ {next_round}회차 데이터가 이미 존재합니다.")
         return
 
     # 알고리즘 기반 번호 생성
     recommendations = generate_advanced_numbers(latest['numbers'])
-    best_pick = recommendations[0]
     
-    # Firebase 신규 문서 작성 (기존 포맷 복원)
+    # Firebase 신규 문서 작성
     new_doc = {
         "round": next_round,
         "drawDate": (dt.now() + datetime.timedelta(days=(5-dt.now().weekday())%7)).strftime("%Y-%m-%d"),
-        "numbers": best_pick,
+        "numbers": recommendations[0],
         "full_sets": json.dumps(recommendations),
         "result": "wait",
         "createdAt": dt.now().isoformat(),
-        "algorithm": "ColdNumber + HighPriority(32-45) + PatternRemoval"
+        "strategy": "ColdNumber + HighPriority(32-45) + PatternRemoval"
     }
     
     db.collection(COLLECTION_NAME).add(new_doc)
-    print(f"🚀 {next_round}회차 추천 번호 업로드 완료: {best_pick}")
+    print(f"🚀 {next_round}회차 추천 번호 업로드 완료: {recommendations[0]}")
 
 if __name__ == "__main__":
     main()
