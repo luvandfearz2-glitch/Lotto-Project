@@ -8,10 +8,10 @@ from collections import Counter
 import os
 import json
 import time
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 # --- 1. 설정 및 초기화 ---
 if os.environ.get('FIREBASE_KEY'):
-    # GitHub Actions 환경에서는 환경 변수에 저장된 JSON 문자열을 파일로 써서 로드하거나 직접 로드 가능
     cred = credentials.Certificate("serviceAccountKey.json")
 else:
     cred = credentials.Certificate("serviceAccountKey.json")
@@ -24,160 +24,156 @@ except ValueError:
 db = firestore.client()
 COLLECTION_NAME = "lotto_predictions"
 
-# --- 2. 데이터 로드 및 API 함수 (안정성 강화) ---
-
-def get_official_lotto_result(drwNo):
-    """동행복권 API (차단 방지 헤더 및 재시도 로직 강화)"""
-    url = f"https://www.dhlottery.co.kr/common.do?method=getLottoNumber&drwNo={drwNo}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-        "Referer": "https://www.dhlottery.co.kr/"
-    }
-    
-    for attempt in range(3):  # 최대 3회 재시도
-        try:
-            res = requests.get(url, headers=headers, timeout=10)
-            if res.status_code == 200:
-                data = res.json()
-                if data.get('returnValue') == 'success':
-                    return {
-                        'drwNo': data['drwNo'],
-                        'date': data['drwNoDate'],
-                        'numbers': [data[f'drwtNo{i}'] for i in range(1, 7)],
-                        'bonus': data['bnusNo']
-                    }
-            time.sleep(2) # 차단 방지를 위한 간격
-        except Exception as e:
-            print(f"⚠️ {drwNo}회차 시도 {attempt+1}: {e}")
-            time.sleep(2)
-    return None
+# --- 2. [수정] 데이터 로드 함수 (현재 작동 확인된 소스) ---
 
 def fetch_history_data():
-    """가장 안정적인 GitHub 데이터셋 또는 대체 경로 활용"""
-    # 주소 1: 공식 데이터 보존용 (주로 업데이트가 빠름)
+    """
+    현재 유효한 오픈소스 로또 데이터셋 주소들입니다.
+    하나가 막히면 다음 주소를 시도합니다.
+    """
     urls = [
+        # 1. 1회부터 최신 회차까지 잘 관리되는 소스
         "https://raw.githubusercontent.com/yous/lotto/master/data.json",
-        "https://raw.githubusercontent.com/p lottery/lotto-data/master/data.json" # 대안 주소
+        # 2. 대체 소스 (구조가 다를 수 있음)
+        "https://raw.githubusercontent.com/skylertaylor/lotto-results/master/results.json"
     ]
     
     for url in urls:
         try:
+            print(f"🌐 데이터 로드 시도 중: {url}")
             res = requests.get(url, timeout=10)
             if res.status_code == 200:
                 data = res.json()
-                # 데이터가 리스트 형태이고 내부에 회차 정보가 있는지 확인
-                if isinstance(data, list) and len(data) > 0:
-                    # 최신순 정렬 (데이터 구조에 따라 key는 다를 수 있음)
-                    return sorted(data, key=lambda x: x.get('round', x.get('drwNo', 0)), reverse=True)
-        except:
+                # 'yous' 저장소 데이터 구조 대응
+                if isinstance(data, list):
+                    # 최신순 정렬 (회차 번호 기준)
+                    return sorted(data, key=lambda x: int(x.get('round', x.get('drwNo', 0))), reverse=True)
+                # 객체 형태일 경우
+                elif isinstance(data, dict):
+                    return sorted(data.values(), key=lambda x: int(x.get('round', x.get('drwNo', 0))), reverse=True)
+        except Exception as e:
+            print(f"❌ {url} 접속 실패: {e}")
             continue
     return []
 
-# --- 3. [요청 반영] 로또 번호 추출 알고리즘 ---
-
-def get_cold_numbers_pool(history_data):
-    """최근 5년(260회) 기준 하위 20% Cold Number 추출"""
-    all_numbers = []
-    target_data = history_data[:260] 
-    for record in target_data:
-        # 데이터셋마다 필드명이 다를 수 있으므로 예외 처리
-        nums = record.get('numbers') or [record.get(f'drwtNo{i}') for i in range(1, 7)]
-        all_numbers.extend(nums)
+def get_official_lotto_result(drwNo):
+    """
+    동행복권 API 직접 호출 (헤더 강화형)
+    """
+    url = f"https://www.dhlottery.co.kr/common.do?method=getLottoNumber&drwNo={drwNo}"
+    # 실제 브라우저와 거의 동일한 헤더 구성
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Referer": "https://www.dhlottery.co.kr/gameResult.do?method=byWin",
+        "X-Requested-With": "XMLHttpRequest"
+    }
     
-    counts = Counter(all_numbers)
-    freq_list = [(n, counts.get(n, 0)) for n in range(1, 46)]
-    freq_list.sort(key=lambda x: x[1])
-    
-    cold_pool = [x[0] for x in freq_list[:9]] # 하위 20%
-    remaining_pool = [x[0] for x in freq_list[9:]]
-    return cold_pool, remaining_pool
+    try:
+        # 동행복권은 단순 GET보다 세션 유지가 안전합니다.
+        session = requests.Session()
+        session.get("https://www.dhlottery.co.kr/", headers=headers, timeout=5)
+        response = session.get(url, headers=headers, timeout=5)
+        
+        # 만약 여전히 403이나 JSON Decode 에러가 나면 텍스트를 확인합니다.
+        if response.status_code == 200:
+            try:
+                return response.json()
+            except:
+                print(f"⚠️ {drwNo}회차: JSON 파싱 실패 (HTML이 반환되었을 수 있음)")
+    except Exception as e:
+        print(f"⚠️ {drwNo}회차 API 호출 오류: {e}")
+    return None
 
-def is_valid_selection(numbers):
-    """고번호 4개 이상 & 시각 패턴 제거"""
-    if sum(1 for n in numbers if 32 <= n <= 45) < 4:
-        return False
-
-    grid = [[0]*7 for _ in range(7)]
-    for n in numbers:
-        r, c = (n - 1) // 7, (n - 1) % 7
-        grid[r][c] = 1
-    
-    for r in range(7):
-        for c in range(5):
-            if grid[r][c] and grid[r][c+1] and grid[r][c+2]: return False
-    for c in range(7):
-        for r in range(5):
-            if grid[r][c] and grid[r+1][c] and grid[r+2][c]: return False
-    return True
+# --- 3. [복원] 로또 번호 추출 알고리즘 (요청하신 조건 준수) ---
 
 def generate_custom_recommendations(history_data):
-    cold_pool, remaining_pool = get_cold_numbers_pool(history_data)
+    # 최근 5년(260회차) 데이터 추출
+    # 데이터셋에 따라 필드명이 'numbers' 또는 'drwtNo1~6'일 수 있음
+    all_numbers = []
+    for record in history_data[:260]:
+        if 'numbers' in record:
+            all_numbers.extend(record['numbers'])
+        else:
+            nums = [record.get(f'drwtNo{i}') for i in range(1, 7)]
+            all_numbers.extend([n for n in nums if n])
+
+    # 1. Cold Number 추출 (빈도 하위 20%)
+    counts = Counter(all_numbers)
+    freq_list = sorted([(n, counts.get(n, 0)) for n in range(1, 46)], key=lambda x: x[1])
+    cold_pool = [x[0] for x in freq_list[:9]]
+    remaining_pool = [x[0] for x in freq_list[9:]]
+
     results = []
     while len(results) < 5:
+        # Cold Number에서 1~2개 선택
         sample_cold = random.sample(cold_pool, random.randint(1, 2))
         sample_remain = random.sample(remaining_pool, 6 - len(sample_cold))
-        combination = sorted(sample_cold + sample_remain)
-        if is_valid_selection(combination) and combination not in results:
-            results.append(combination)
+        comb = sorted(sample_cold + sample_remain)
+
+        # 2. 생일수 배제 (32~45번 고번호가 4개 이상)
+        if sum(1 for n in comb if n >= 32) < 4:
+            continue
+
+        # 3. 용지 시각적 패턴 제거 (가로/세로 3연속 금지)
+        grid = [[0]*7 for _ in range(7)]
+        for n in comb:
+            grid[(n-1)//7][(n-1)%7] = 1
+        
+        is_pattern = False
+        for i in range(7):
+            for j in range(5):
+                if grid[i][j] and grid[i][j+1] and grid[i][j+2]: is_pattern = True
+                if grid[j][i] and grid[j+1][i] and grid[j+2][i]: is_pattern = True
+        
+        if not is_pattern and comb not in results:
+            results.append(comb)
+            
     return results
 
-# --- 4. 메인 로직 (Firebase 복원 및 실행) ---
-
-def check_winning_status():
-    # Positional argument 경고 해결을 위해 'filter' 구조 사용
-    from google.cloud.firestore_v1.base_query import FieldFilter
-    
-    docs = db.collection(COLLECTION_NAME).where(filter=FieldFilter("result", "==", "wait")).stream()
-    
-    for doc in docs:
-        data = doc.to_dict()
-        round_no = data['round']
-        official = get_official_lotto_result(round_no)
-        
-        if official:
-            # 여기에 기존 등수 계산 알고리즘(calculate_rank)을 추가하여 처리
-            doc.reference.update({
-                "result": "win/lose_processed",
-                "winningNumbers": official['numbers'],
-                "bonus": official['bonus'],
-                "updatedAt": dt.now().isoformat()
-            })
-            print(f"✅ {round_no}회차 결과 업데이트 성공")
+# --- 4. 메인 실행 로직 ---
 
 def main():
     print("--- 1. 기존 당첨 내역 확인 ---")
-    check_winning_status()
-    
-    print("\n--- 2. 데이터 로드 및 추천 생성 ---")
+    docs = db.collection(COLLECTION_NAME).where(filter=FieldFilter("result", "==", "wait")).stream()
+    for doc in docs:
+        round_no = doc.to_dict()['round']
+        res = get_official_lotto_result(round_no)
+        if res and res.get('returnValue') == 'success':
+            doc.reference.update({
+                "result": "processed",
+                "winningNumbers": [res[f'drwtNo{i}'] for i in range(1, 7)],
+                "bonus": res['bnusNo'],
+                "updatedAt": dt.now().isoformat()
+            })
+            print(f"✅ {round_no}회차 결과 업데이트 완료")
+
+    print("\n--- 2. 신규 번호 생성 및 업로드 ---")
     history = fetch_history_data()
     if not history:
-        print("❌ 에러: GitHub 데이터셋에 접근할 수 없습니다. URL을 확인하세요.")
+        print("🛑 데이터를 불러올 수 없습니다. GitHub 소스를 확인하세요.")
         return
 
-    # 회차 정보 추출 (데이터셋 구조 유연하게 대응)
-    last_round = history[0].get('round') or history[0].get('drwNo')
+    # 최신 회차 번호 추출
+    last_round = int(history[0].get('round', history[0].get('drwNo', 0)))
     next_round = last_round + 1
     
-    # 중복 확인
-    from google.cloud.firestore_v1.base_query import FieldFilter
-    existing = db.collection(COLLECTION_NAME).where(filter=FieldFilter("round", "==", next_round)).get()
-    if len(existing) > 0:
-        print(f"⚠️ {next_round}회차 추천이 이미 존재합니다.")
+    # 중복 체크
+    if len(db.collection(COLLECTION_NAME).where(filter=FieldFilter("round", "==", next_round)).get()) > 0:
+        print(f"⚠️ {next_round}회차 추천 번호가 이미 존재합니다.")
         return
 
     recommendations = generate_custom_recommendations(history)
     
-    new_doc = {
+    db.collection(COLLECTION_NAME).add({
         "round": next_round,
         "drawDate": (dt.now() + datetime.timedelta(days=(5-dt.now().weekday())%7)).strftime("%Y-%m-%d"),
         "numbers": recommendations[0],
         "full_sets": json.dumps(recommendations),
         "result": "wait",
         "createdAt": dt.now().isoformat()
-    }
-    
-    db.collection(COLLECTION_NAME).add(new_doc)
-    print(f"🚀 {next_round}회차 업로드 완료 (Cold Number + 고번호 전략)")
+    })
+    print(f"🚀 {next_round}회차 업로드 완료!")
 
 if __name__ == "__main__":
     main()
