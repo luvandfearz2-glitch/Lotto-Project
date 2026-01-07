@@ -12,16 +12,17 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4  # v3 -> v4로 업그레이드
+      uses: actions/checkout@v4  # 최신 버전 유지
       
     - name: Set up Python
-      uses: actions/setup-python@v5 # v4 -> v5로 업그레이드
+      uses: actions/setup-python@v5 # 최신 버전 유지
       with:
-        python-version: '3.12'  # 3.9 -> 3.12로 업그레이드 (오류 해결)
+        python-version: '3.12'  # 최신 버전 유지
         
     - name: Install libraries
       run: |
-        pip install firebase-admin requests
+        # 웹 스크래핑(beautifulsoup4)과 최신 Firestore 필터링을 위한 라이브러리 추가
+        pip install firebase-admin requests beautifulsoup4 google-cloud-firestore
         
     - name: Create Account Key File
       env:
